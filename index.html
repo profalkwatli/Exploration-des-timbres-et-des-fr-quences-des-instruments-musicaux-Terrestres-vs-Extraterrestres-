@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>TP : Mesure précise (clic + curseurs) — conservation du son</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body { font-family: Arial, sans-serif; margin: 20px; }
+  h1 { color: #2c3e50; }
+  .controls { margin-bottom: 12px; }
+  label { margin-right: 8px; }
+  #waveformContainer { position: relative; display:inline-block; }
+  canvas { border: 1px solid #ccc; margin-top: 10px; cursor: crosshair; display:block; }
+  /* Curseurs superposés */
+  .cursorLine {
+    position: absolute;
+    top: 0;
+    width: 2px;
+    background: rgba(220,20,60,0.95);
+    height: 100%;
+    transform: translateX(-1px);
+    cursor: col-resize;
+    z-index: 20;
+  }
+  .cursorHandle {
+    position: absolute;
+    top: -12px;
+    left: -6px;
+    width: 14px;
+    height: 14px;
+    background: rgba(220,20,60,0.95);
+    border-radius: 3px;
+    z-index: 25;
+    cursor: grab;
+  }
+  .controls-row { display:flex; gap:8px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
+  .charts { display:flex; gap:20px; align-items:flex-start; }
+  table { border-collapse: collapse; margin-top: 12px; width: 100%; }
+  th, td { border: 1px solid #ccc; padding: 6px; text-align: center; }
+  th { background: #f0f0f0; }
+  button { padding:6px 10px; }
+  #intervalDisplay { font-weight: bold; margin-top:8px; }
+</style>
+</head>
+<body>
+
+<h1>Exploration des timbres et des fréquences des instruments musicaux (Terrestres vs Extraterrestres)
+<span style="display:block; font-size:15px; font-weight:normal;">
+    (Developed by Prof. AL KWATLI) 
+  </span>
+  <span style="display:block; font-size:15px; font-weight:normal;">
+    E-mail: dr.alkwatli@gmail.com
+  </span>
+</h1>
+
+<div class="controls controls-row">
+  <div>
+    <label for="instrument">Instrument :</label>
+    <select id="instrument">
+      <option value="diapason">Diapason</option>
+      <option value="piano">Piano</option>
+      <option value="extraterrestre">Extraterrestre</option>
+      <option value="robot">Voix Robot</option>
+      <option value="metallic">Cloches métalliques</option>
+      <option value="glassy">Cristallin / Glassy</option>
+      <option value="pulsing">Bourdonnement pulsé</option>
+    </select>
+  </div>
+
+  <div>
+    <label for="note">Note :</label>
+    <select id="note">
+      <option value="261.63">Do</option>
+      <option value="293.66">Ré</option>
+      <option value="329.63">Mi</option>
+      <option value="349.23">Fa</option>
+      <option value="392.00">Sol</option>
+      <option value="440.00">La</option>
+      <option value="493.88">Si</option>
+    </select>
+  </div>
+
+  <button onclick="playSound()">🎶 Jouer</button>
+  <button onclick="resetSelection()">🔄 Réinitialiser sélection</button>
+  <button onclick="applyIntervalToInputs()">↪ Appliquer l'intervalle</button>
+  <label><input type="checkbox" id="snapCheckbox" checked> Snap to peak</label>
+  <button onclick="exportCSV()">⬇ Exporter CSV</button>
+  <button onclick="exportWav()">⬇ Exporter WAV</button>
+</div>
+
+<div class="controls-row">
+  <label>Zoom temps (ms) :</label>
+  <input type="range" id="zoomSlider" min="5" max="200" value="20" step="5" oninput="updateZoomValue()">
+  <span id="zoomValue">20</span> ms
+</div>
+
+<div class="charts">
+  <div id="waveformContainer">
+    <canvas id="waveform" width="600" height="220"></canvas>
+    <!-- Curseurs superposés -->
+    <div id="cursor1" class="cursorLine" style="left:0; display:none;"><div class="cursorHandle"></div></div>
+    <div id="cursor2" class="cursorLine" style="left:0; display:none;"><div class="cursorHandle"></div></div>
+  </div>
+
+  <canvas id="spectrum" width="500" height="220"></canvas>
+</div>
+
+<p id="intervalDisplay">t1 : 0 s | t2 : 0 s | Intervalle : 0 s</p>
+
+<div style="margin-top:10px;">
+  <h3>👉 Mesure par l'élève</h3>
+  <label>Période mesurée (s) :</label>
+  <input type="number" id="periodeEleve" step="0.0001">
+  <label>Fréquence calculée (Hz) :</label>
+  <input type="number" id="frequenceEleve" step="0.1">
+  <button onclick="ajouterLigne()">➕ Ajouter au tableau</button>
+</div>
+
+<h3>📊 Tableau des essais</h3>
+<table id="resultsTable">
+  <thead>
+    <tr><th>Instrument</th><th>Note</th><th>Période théorique (s)</th><th>Fréquence théorique (Hz)</th><th>Période élève (s)</th><th>Fréquence élève (Hz)</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+/* ============================
+   AUDIO + SIGNAL (UNCHANGED)
+   ============================
+   I keep your generateSignal and audio code exactly as you had.
+   If you want me to use a different generateSignal, tell me explicitly.
+*/
+
+let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let chartWave, chartSpec;
+let bufData, fs = 44100;
+
+/* ADSR + generateSignal - kept as in your previous version (unchanged) */
+function ADSR(t,dur,A=0.01,D=0.1,S=0.8,R=0.2){
+  if(t<A) return t/A;
+  else if(t<A+D) return 1-(1-S)*(t-A)/D;
+  else if(t<dur-R) return S;
+  else if(t<dur) return S*(1-(t-(dur-R))/R);
+  return 0;
+}
+
+function generateSignal(instr,freq,dur=2){
+  let len=Math.floor(fs*dur);
+  let buf=audioCtx.createBuffer(1,len,fs);
+  let data=buf.getChannelData(0);
+  let h=[], env=t=>1, vibratoFreq=0, vibratoDepth=0, noiseAmp=0;
+
+  switch(instr){
+    case 'diapason': h=[{n:1,a:1}]; env=t=>ADSR(t,dur,0.01,0.05,1,0.1); break;
+    case 'piano': h=[{n:1,a:1},{n:2,a:0.7},{n:3,a:0.5},{n:4,a:0.3},{n:5,a:0.2}]; env=t=>ADSR(t,dur,0.01,0.2,0.5,0.6); break;
+    case 'extraterrestre': h=[{n:1,a:1},{n:2,a:0.6},{n:3,a:0.5},{n:4,a:0.3},{n:5,a:0.25},{n:7,a:0.2},{n:11,a:0.1}]; env=t=>ADSR(t,dur,0.02,0.2,0.7,0.3); vibratoFreq=6; vibratoDepth=0.01; noiseAmp=0.02; break;
+    case 'robot': h=[{n:1,a:1},{n:2,a:0.5},{n:3,a:0.3}]; env=t=>ADSR(t,dur,0.01,0.05,0.7,0.1); vibratoFreq=10; vibratoDepth=0.05; noiseAmp=0.05; break;
+    case 'metallic': h=[{n:1,a:1},{n:2,a:0.7},{n:3,a:0.5}]; env=t=>ADSR(t,dur,0.01,0.02,0.3,1.5); break;
+    case 'glassy': h=[{n:1,a:1},{n:2,a:0.6},{n:4,a:0.4}]; env=t=>ADSR(t,dur,0.02,0.05,0.5,0.5); break;
+    case 'pulsing': h=[{n:1,a:1},{n:1.01,a:0.8},{n:0.99,a:0.7}]; env=t=>ADSR(t,dur,0.05,0.1,0.5,0.2); break;
+  }
+
+  for(let i=0;i<len;i++){
+    let t=i/fs;
+    let freqInst=freq;
+    if(vibratoFreq>0) freqInst=freq*(1+vibratoDepth*Math.sin(2*Math.PI*vibratoFreq*t));
+    let s=0;
+    for(let p of h) s+=p.a*Math.sin(2*Math.PI*p.n*freqInst*t);
+    if(noiseAmp>0) s+=(Math.random()*2-1)*noiseAmp;
+    data[i]=s*env(t);
+  }
+
+  let maxAmp=Math.max(...data.map(x=>Math.abs(x)));
+  if(maxAmp>0) for(let i=0;i<len;i++) data[i]/=maxAmp;
+  return buf;
+}
+
+/* Playback and plot (kept) */
+function playSound(){
+  let instr=document.getElementById('instrument').value;
+  let freq=parseFloat(document.getElementById('note').value);
+  let buf=generateSignal(instr,freq,2);
+  bufData = buf.getChannelData(0);
+  let src=audioCtx.createBufferSource();
+  src.buffer=buf;
+  src.connect(audioCtx.destination);
+  src.start();
+  setTimeout(()=>{ plotWaveform(bufData); plotSpectrumFFT(bufData,freq); },50);
+}
+
+/* Plot waveform (Chart.js) — we will overlay cursor divs on top */
+function plotWaveform(data){
+  if(!data) return;
+  let zoomMs = parseFloat(document.getElementById('zoomSlider').value);
+  let duration = zoomMs / 1000;
+  let end = Math.min(data.length, Math.floor(duration * fs));
+  // sample step to get ~600 points
+  let step = Math.max(1, Math.floor(end / 600));
+  let labels = [], vals = [];
+  for(let i=0;i<end;i+=step){ labels.push((i/fs).toFixed(5)); vals.push(data[i]); }
+
+  if(chartWave) chartWave.destroy();
+  let ctx = document.getElementById('waveform').getContext('2d');
+  chartWave = new Chart(ctx, {
+    type:'line',
+    data:{ labels: labels, datasets:[{ label:'Onde', data: vals, borderColor:'blue', fill:false, pointRadius:0}]},
+    options:{ responsive:false, scales:{ x:{ title:{ display:true, text:'Temps (s)'}}, y:{ min:-1, max:1 }}}
+  });
+
+  // update cursor visuals (position them relative to displayed windowStart=0)
+  updateCursorVisuals();
+}
+
+
+/* FFT using simple radix-2 FFT — works for power-of-2 length */
+function plotSpectrumFFT(data, fundamentalFreq) {
+  const N = 2048;
+  const buffer = new Array(N).fill(0);
+  for (let i = 0; i < N; i++) buffer[i] = i < data.length ? data[i] * 0.5 * (1 - Math.cos(2 * Math.PI * i / (N - 1))) : 0;
+
+  // --- simple recursive FFT ---
+  function fft(re) {
+    const n = re.length;
+    if (n <= 1) return { re: re.slice(), im: new Array(n).fill(0) };
+    const even = fft(re.filter((_, i) => i % 2 === 0));
+    const odd = fft(re.filter((_, i) => i % 2 === 1));
+    const reOut = new Array(n).fill(0);
+    const imOut = new Array(n).fill(0);
+    for (let k = 0; k < n / 2; k++) {
+      const angle = -2 * Math.PI * k / n;
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      const reTemp = cos * odd.re[k] - sin * odd.im[k];
+      const imTemp = sin * odd.re[k] + cos * odd.im[k];
+      reOut[k] = even.re[k] + reTemp;
+      imOut[k] = even.im[k] + imTemp;
+      reOut[k + n / 2] = even.re[k] - reTemp;
+      imOut[k + n / 2] = even.im[k] - imTemp;
+    }
+    return { re: reOut, im: imOut };
+  }
+
+  const fftRes = fft(buffer);
+  const mag = fftRes.re.map((r, i) => Math.sqrt(r * r + fftRes.im[i] * fftRes.im[i]));
+  const freqs = Array.from({ length: N / 2 }, (_, i) => i * fs / N).filter(f => f <= 4000);
+  const mags = freqs.map((f, i) => mag[i]);
+
+  // Highlight fundamental + harmonics
+  let harmonics = [];
+  let n = 1;
+  while (n * fundamentalFreq < 4000) {
+    harmonics.push(n * fundamentalFreq);
+    n++;
+  }
+
+  const colors = freqs.map(f => {
+    if (Math.abs(f - harmonics[0]) < fundamentalFreq / 10) return 'red';
+    for (let h = 1; h < harmonics.length; h++) if (Math.abs(f - harmonics[h]) < fundamentalFreq / 10) return 'orange';
+    return 'green';
+  });
+
+  if (chartSpec) chartSpec.destroy();
+  const ctx = document.getElementById('spectrum').getContext('2d');
+  chartSpec = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: freqs.map(f => f.toFixed(1)), datasets: [{ label: 'Amplitude FFT', data: mags, backgroundColor: colors }] },
+    options: {
+      responsive: false,
+      scales: {
+        x: { title: { display: true, text: 'Fréquence (Hz)' } },
+        y: { title: { display: true, text: 'Amplitude' } }
+      }
+    }
+  });
+}
+
+
+/* ------------------------------
+   CURSORS (click + drag + snap)
+   ------------------------------ */
+
+const waveformCanvas = document.getElementById('waveform');
+const container = document.getElementById('waveformContainer');
+const cursor1 = document.getElementById('cursor1');
+const cursor2 = document.getElementById('cursor2');
+let activeDrag = null; // 'c1' or 'c2'
+let selectedCursor = null; // for keyboard nudging
+let windowStart = 0; // currently always 0 (no panning), but left for extension
+
+// Helper: convert time -> left px relative to container
+function timeToLeftPx(time){
+  const zoomMs = parseFloat(document.getElementById('zoomSlider').value);
+  const duration = zoomMs/1000;
+  const width = waveformCanvas.clientWidth;
+  let rel = (time - windowStart) / duration;
+  return rel * width;
+}
+function leftPxToTime(px){
+  const zoomMs = parseFloat(document.getElementById('zoomSlider').value);
+  const duration = zoomMs/1000;
+  const width = waveformCanvas.clientWidth;
+  let rel = px / width;
+  return windowStart + rel * duration;
+}
+
+// Show/hide and position cursor visuals
+function updateCursorVisuals(){
+  if(!bufData) return;
+  const width = waveformCanvas.clientWidth;
+  const height = waveformCanvas.clientHeight;
+  // cursor 1
+  if(t1 > 0){
+    cursor1.style.display = 'block';
+    let left = timeToLeftPx(t1);
+    cursor1.style.left = left + 'px';
+  } else { cursor1.style.display = 'none'; }
+  // cursor 2
+  if(t2 > 0){
+    cursor2.style.display = 'block';
+    let left2 = timeToLeftPx(t2);
+    cursor2.style.left = left2 + 'px';
+  } else { cursor2.style.display = 'none'; }
+}
+
+/* Snap to nearest local peak in a small window around the clicked sample */
+function snapToPeak(time){
+  if(!bufData) return time;
+  const idx = Math.round(time * fs);
+  const radius = 100; // samples search radius (adjust if needed)
+  let start = Math.max(0, idx - radius);
+  let end = Math.min(bufData.length-1, idx + radius);
+  let best = start;
+  let bestVal = Math.abs(bufData[start]);
+  for(let i=start+1;i<=end;i++){
+    let v = Math.abs(bufData[i]);
+    if(v > bestVal){ bestVal = v; best = i; }
+  }
+  return best / fs;
+}
+
+/* Click handling: left -> t1, right -> t2 (snap optional) */
+waveformCanvas.addEventListener('mousedown', function(evt){
+  if(!bufData) return;
+  const rect = waveformCanvas.getBoundingClientRect();
+  const x = evt.clientX - rect.left;
+  const timeClicked = leftPxToTime(x);
+  const snap = document.getElementById('snapCheckbox').checked;
+  const snappedTime = snap ? snapToPeak(timeClicked) : timeClicked;
+  if(evt.button === 0){ // left
+    t1 = snappedTime;
+    selectedCursor = 'c1';
+  } else if(evt.button === 2){ // right
+    t2 = snappedTime;
+    selectedCursor = 'c2';
+  }
+  updateIntervalDisplay();
+  updateCursorVisuals();
+});
+
+// prevent context menu on right click
+waveformCanvas.addEventListener('contextmenu', e => e.preventDefault());
+
+/* Dragging the cursor handles */
+function startDrag(cursorId, evt){
+  evt.preventDefault();
+  activeDrag = cursorId;
+  document.addEventListener('mousemove', onDrag);
+  document.addEventListener('mouseup', endDrag);
+}
+function onDrag(evt){
+  if(!activeDrag || !bufData) return;
+  const rect = waveformCanvas.getBoundingClientRect();
+  const x = evt.clientX - rect.left;
+  const time = leftPxToTime(x);
+  const snap = document.getElementById('snapCheckbox').checked;
+  const snapped = snap ? snapToPeak(time) : time;
+  if(activeDrag === 'c1'){ t1 = Math.max(0, snapped); selectedCursor = 'c1'; }
+  if(activeDrag === 'c2'){ t2 = Math.max(0, snapped); selectedCursor = 'c2'; }
+  updateIntervalDisplay();
+  updateCursorVisuals();
+}
+function endDrag(){
+  activeDrag = null;
+  document.removeEventListener('mousemove', onDrag);
+  document.removeEventListener('mouseup', endDrag);
+}
+
+// attach handlers to cursor elements (handle area)
+cursor1.querySelector('.cursorHandle').addEventListener('mousedown', e => startDrag('c1', e));
+cursor2.querySelector('.cursorHandle').addEventListener('mousedown', e => startDrag('c2', e));
+
+/* Keyboard nudging: left/right arrow moves selected cursor by 1 sample */
+document.addEventListener('keydown', function(e){
+  if(!selectedCursor) return;
+  if(e.key === 'ArrowLeft' || e.key === 'ArrowRight'){
+    e.preventDefault();
+    const delta = (e.key === 'ArrowLeft') ? -1/fs : 1/fs;
+    if(selectedCursor === 'c1'){ t1 = Math.max(0, t1 + delta); }
+    if(selectedCursor === 'c2'){ t2 = Math.max(0, t2 + delta); }
+    updateIntervalDisplay();
+    updateCursorVisuals();
+  }
+});
+
+/* Update display of interval */
+function updateIntervalDisplay(){
+  const interval = Math.abs(t2 - t1);
+  document.getElementById('intervalDisplay').innerText = `t1 : ${t1.toFixed(5)} s | t2 : ${t2.toFixed(5)} s | Intervalle : ${interval.toFixed(5)} s`;
+}
+
+/* Apply measured interval to the inputs (fill periodeEleve and frequenceEleve) */
+function applyIntervalToInputs(){
+  const interval = Math.abs(t2 - t1);
+  if(interval <= 0){ alert('Définissez t1 et t2 (clic gauche / droit ou glissez les curseurs).'); return; }
+  document.getElementById('periodeEleve').value = interval.toFixed(5);
+  
+}
+
+/* Reset selection */
+function resetSelection(){
+  t1 = 0; t2 = 0; selectedCursor = null;
+  updateIntervalDisplay();
+  updateCursorVisuals();
+}
+
+/* Attach click to reset button too (if present in your page) */
+function resetSelectionButton(){ resetSelection(); }
+
+/* Add result row in table (no validation column) */
+function ajouterLigne(){
+  let instr=document.getElementById('instrument').value;
+  let note=document.getElementById('note');
+  let fTh=parseFloat(note.value);
+  let pTh=1/fTh;
+  let pEleve=parseFloat(document.getElementById('periodeEleve').value);
+  let fEleve=parseFloat(document.getElementById('frequenceEleve').value);
+  let table=document.getElementById('resultsTable').getElementsByTagName('tbody')[0];
+  let row=table.insertRow();
+  row.insertCell(0).innerText=instr;
+  row.insertCell(1).innerText=note.options[note.selectedIndex].text;
+  row.insertCell(2).innerText=pTh.toFixed(5);
+  row.insertCell(3).innerText=fTh.toFixed(2);
+  row.insertCell(4).innerText=isNaN(pEleve)?'':pEleve.toFixed(5);
+  row.insertCell(5).innerText=isNaN(fEleve)?'':fEleve.toFixed(2);
+}
+
+/* Export CSV (kept) */
+function exportCSV(){
+  let rows=document.querySelectorAll('table tr');
+  let csv=[];
+  rows.forEach(r=>{ let cols=r.querySelectorAll('td,th'); let rowData=[]; cols.forEach(c=>rowData.push(c.innerText)); csv.push(rowData.join(',')); });
+  let blob=new Blob([csv.join('\n')],{type:'text/csv'});
+  let url=window.URL.createObjectURL(blob); let a=document.createElement('a'); a.href=url; a.download='resultats.csv'; a.click();
+}
+
+/* Export WAV (kept) */
+function exportWav(){
+  if(!bufData) return;
+  let wavBuffer = encodeWAV(bufData);
+  let blob = new Blob([wavBuffer], { type: 'audio/wav' });
+  let url = URL.createObjectURL(blob);
+  let a = document.createElement('a'); a.href = url; a.download = 'signal.wav'; a.click();
+}
+function encodeWAV(samples){
+  let buffer = new ArrayBuffer(44 + samples.length * 2);
+  let view = new DataView(buffer);
+  function writeString(v, o, s){ for(let i=0;i<s.length;i++) v.setUint8(o+i, s.charCodeAt(i)); }
+  let length = 36 + samples.length * 2;
+  writeString(view, 0, 'RIFF'); view.setUint32(4, length, true);
+  writeString(view, 8, 'WAVE'); writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, fs, true); view.setUint32(28, fs*2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeString(view, 36, 'data'); view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for(let i=0;i<samples.length;i++, offset+=2){
+    let s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return view;
+}
+
+/* Zoom slider display + replot (kept simple) */
+function updateZoomValue(){
+  document.getElementById('zoomValue').innerText = document.getElementById('zoomSlider').value;
+  if(bufData) plotWaveform(bufData);
+}
+
+/* initialise display */
+updateIntervalDisplay();
+
+</script>
+</body>
+</html>
